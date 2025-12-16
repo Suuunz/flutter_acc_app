@@ -5,6 +5,7 @@ import 'package:flutter_naver_map/flutter_naver_map.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 
 import '../constants/theme.dart';
 import '../services/api_service.dart';
@@ -23,21 +24,38 @@ class _HomeScreenState extends State<HomeScreen> {
   final FlutterSoundRecorder _recorder = FlutterSoundRecorder();
   final Completer<NaverMapController> _mapControllerCompleter = Completer();
 
+  // TTS 객체
+  final FlutterTts _tts = FlutterTts();
+
   bool _isLoading = false;
   bool _isRecording = false;
 
-  // 상태 변수들
-  String _selectedStore = "매장을 선택해주세요";
+  String _selectedStore = "현재 위치";
+  // [수정] 기본값 카페
   String _selectedCategory = "cafe";
+
   int? _currentSessionId;
-  String _currentSttText = ""; // [New] STT 원문 저장
+  String _currentSttText = "";
   List<String> _currentRecommendations = [];
-  List<String> _history = [];  // [New] 선택된 청크들 저장
+  List<String> _history = [];
 
   @override
   void initState() {
     super.initState();
     _initRecorder();
+    _initTts();
+  }
+
+  void _initTts() async {
+    await _tts.setLanguage("ko-KR");
+    await _tts.setPitch(1.0);
+    await _tts.setSpeechRate(0.5);
+  }
+
+  Future<void> _speak(String text) async {
+    if (text.isNotEmpty) {
+      await _tts.speak(text);
+    }
   }
 
   Future<void> _initRecorder() async {
@@ -48,10 +66,11 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _recorder.closeRecorder();
+    _tts.stop();
     super.dispose();
   }
 
-  // --- 1. 녹음 종료 및 첫 요청 ---
+  // --- 녹음 및 서버 통신 ---
   Future<void> _handleRecording() async {
     if (_isRecording) {
       final path = await _recorder.stopRecorder();
@@ -59,16 +78,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (path != null) {
         try {
+          // 1. STT 변환
           String sttText = await _apiService.textToSpeech(path);
 
-          final result = await _apiService.startChat(_selectedCategory, sttText);
+          // 2. 서버 요청 로직 수정
+          // [핵심 수정] 'others'가 선택되었을 경우 빈 문자열("") 전송, 아니면 해당 키값 전송
+          String categoryToSend = _selectedCategory == 'others' ? "" : _selectedCategory;
+
+          print("전송 카테고리: '$categoryToSend', STT: $sttText"); // 디버깅용 로그
+
+          final result = await _apiService.startChat(categoryToSend, sttText);
 
           setState(() {
             _isLoading = false;
             _currentSessionId = result['sessionId'];
             _currentRecommendations = List<String>.from(result['topKChunks']);
-            _currentSttText = sttText; // STT 저장
-            _history = []; // 히스토리 초기화
+            _currentSttText = sttText;
+            _history = [];
           });
 
           _showResultSheet();
@@ -88,14 +114,13 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // --- 2. 청크 선택 로직 ---
   Future<void> _handleChunkSelect(String selectedText) async {
     if (_currentSessionId == null) return;
 
-    Navigator.pop(context); // 로딩을 위해 닫기
+    Navigator.pop(context);
     setState(() {
       _isLoading = true;
-      _history.add(selectedText); // [New] 선택한 문장을 히스토리에 추가
+      _history.add(selectedText);
     });
 
     try {
@@ -106,7 +131,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _currentRecommendations = List<String>.from(result['topKChunks']);
       });
 
-      _showResultSheet(); // 갱신된 정보로 다시 열기
+      _showResultSheet();
 
     } catch (e) {
       print("선택 에러: $e");
@@ -114,51 +139,163 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // --- 3. [New] 문장 완성 로직 ---
+  // --- 문장 완성 ---
   void _handleComplete() {
-    Navigator.pop(context); // 바텀 시트 닫기
-
-    // 최종 문장 조합
+    Navigator.pop(context);
     String finalSentence = _history.join(" ");
 
-    // 화면 중앙에 크게 보여주기 (Dialog)
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text("완성된 문장"),
-        content: Text(
-          finalSentence.isEmpty ? "선택된 문장이 없습니다." : finalSentence,
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: AppColors.primary),
-          textAlign: TextAlign.center,
+        title: const Row(
+          children: [
+            Icon(Icons.check_circle, color: AppColors.primary),
+            SizedBox(width: 8),
+            Text("완성된 문장"),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            GestureDetector(
+              onTap: () => _speak(finalSentence),
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: AppColors.background,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  finalSentence.isEmpty ? "선택된 문장이 없습니다." : finalSentence,
+                  style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textDark
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton.icon(
+                onPressed: () => _speak(finalSentence),
+                icon: const Icon(Icons.volume_up_rounded, color: Colors.white),
+                label: const Text("소리로 듣기", style: TextStyle(color: Colors.white, fontSize: 16)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+            ),
+          ],
         ),
         actions: [
           TextButton(
             onPressed: () {
-              // TODO: 여기서 TTS로 읽어주기 기능 추가 가능
+              _tts.stop();
               Navigator.pop(context);
             },
-            child: const Text("확인"),
+            child: const Text("닫기", style: TextStyle(color: Colors.grey)),
           )
         ],
       ),
     );
   }
 
-  // 결과창 띄우기
   void _showResultSheet() {
     if (!mounted) return;
-
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) => ResultSheet(
         storeName: _selectedStore,
-        sttText: _currentSttText, // 전달
-        history: _history,        // 전달
+        sttText: _currentSttText,
+        history: _history,
         recommendations: _currentRecommendations,
         onChunkSelected: _handleChunkSelect,
-        onComplete: _handleComplete, // 전달
+        onComplete: _handleComplete,
+      ),
+    );
+  }
+
+  List<NMarker> _createDemoMarkers() {
+    final marker1 = NMarker(
+      id: '1',
+      position: const NLatLng(37.5665, 126.9780),
+      caption: const NOverlayCaption(text: "스타벅스"),
+    );
+    marker1.setOnTapListener((overlay) {
+      setState(() {
+        _selectedStore = "스타벅스 시청점";
+        _selectedCategory = "cafe";
+      });
+    });
+    return [marker1];
+  }
+
+  // --- [NEW] 컨텍스트 선택 버튼 위젯 ---
+  Widget _buildContextSelector() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 15),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(30),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          )
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildCategoryBtn("cafe", "☕ 카페"),
+          const SizedBox(width: 5),
+          _buildCategoryBtn("restaurant", "🍽️ 식당"),
+          const SizedBox(width: 5),
+          // [수정] 병원 -> 기타(others)로 변경
+          _buildCategoryBtn("others", "💬 기타"),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCategoryBtn(String key, String label) {
+    bool isSelected = _selectedCategory == key;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _selectedCategory = key;
+          // [수정] 기타 선택 시 상단 표시 텍스트 변경
+          if (key == 'others') {
+            _selectedStore = "일반 대화 모드";
+          } else {
+            _selectedStore = "현재 위치: $label";
+          }
+        });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: isSelected ? AppColors.primary : Colors.transparent,
+          borderRadius: BorderRadius.circular(25),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? Colors.white : Colors.grey[600],
+            fontWeight: FontWeight.bold,
+            fontSize: 14,
+          ),
+        ),
       ),
     );
   }
@@ -168,8 +305,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text("AAC Service", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        title: const Text("AACommu", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         backgroundColor: AppColors.primary,
+        elevation: 0,
       ),
       body: Stack(
         children: [
@@ -180,6 +318,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               onMapReady: (controller) {
                 _mapControllerCompleter.complete(controller);
+                controller.addOverlayAll(_createDemoMarkers().toSet());
               },
             ),
           ),
@@ -192,12 +331,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
           Positioned(
             bottom: 30, left: 0, right: 0,
-            child: Center(
-              child: RecordButton(
-                isRecording: _isRecording,
-                isLoading: _isLoading,
-                onTap: _handleRecording,
-              ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildContextSelector(),
+                RecordButton(
+                  isRecording: _isRecording,
+                  isLoading: _isLoading,
+                  onTap: _handleRecording,
+                ),
+              ],
             ),
           )
         ],

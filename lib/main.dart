@@ -12,7 +12,7 @@ void main() async {
   // 2. 네이버 지도 초기화 (최종 수정)
   // [설명] 최신 버전에서는 FlutterNaverMap() 객체를 생성한 뒤 .init()을 호출해야 합니다.
   await FlutterNaverMap().init(
-    clientId: 'your_client_id',
+    clientId: 'ho5etl22ab',
     onAuthFailed: (ex) => print("네이버 지도 인증 실패: $ex"),
   );
 
